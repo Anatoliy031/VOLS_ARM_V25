@@ -12,9 +12,9 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
-<script src="ppo-core.js?v=3.5.8"></script>
-<script src="ppo-refs.js?v=3.5.8"></script>
-<script src="ppo-kmz.js?v=3.5.8"></script>
+<script src="ppo-core.js?v=3.5.9"></script>
+<script src="ppo-refs.js?v=3.5.9"></script>
+<script src="ppo-kmz.js?v=3.5.9"></script>
 
 <style>
 :root{
@@ -746,10 +746,12 @@ function gapOf(pm){
    отсутствие фотографий. Раньше жёлтым помечалось отсутствие фотографий —
    теперь жёлтый занят разрывом цепи (как в «Осмотре»), а метка без снимков
    стала чёрной. */
-/* опора в осмотре, за которой закреплена метка */
-function poleOfMark(pm){
+/* опора в осмотре, за которой закреплена метка.
+   Снимок данных передаётся снаружи: за одну отрисовку карточки опора искалась
+   несколько раз, и каждый раз объект читался и разбирался заново. */
+function poleOfMark(pm, snap){
   if(!pm || pm.type!=="point") return null;
-  var d; try{ d=PPO.load(); }catch(e){ return null; }
+  var d=snap; if(!d){ try{ d=PPO.load(); }catch(e){ return null; } }
   var hit=null;
   if(pm.poleId) d.poles.forEach(function(p){ if(!hit && p.id===pm.poleId) hit=p; });
   if(!hit){
@@ -778,14 +780,21 @@ function selectEl(label,options,current,placeholder){
 }
 /* линия: свободный ввод с подсказкой из линий, уже встречающихся в проекте —
    полевое обозначение фидера редко совпадает с договорным */
-function lineFieldEl(label,current){
+function lineFieldEl(label,current,snap){
   var w=document.createElement("div"); w.className="pop-field";
   var l=document.createElement("div"); l.className="pop-lbl"; l.textContent=label;
   var id="dl-line-"+Math.random().toString(36).slice(2,7);
   var inp=document.createElement("input"); inp.className="pop-inp"; inp.value=current||"";
   inp.setAttribute("list",id); inp.placeholder="ВЛ 10 кВ ТМ-6";
   var dl=document.createElement("datalist"); dl.id=id;
-  var lines=[]; try{ lines=PPO.projectLines(); }catch(e){}
+  /* линии берём из готового снимка: отдельный вызов заново читал бы объект */
+  var lines=[], seen={};
+  if(snap && snap.poles){
+    (snap.lines||[]).concat(snap.poles).forEach(function(x){
+      var t=String((x.disp||x.line)||"").trim();
+      if(t && !seen[t.toLowerCase()]){ seen[t.toLowerCase()]=1; lines.push(t); }
+    });
+  } else { try{ lines=PPO.projectLines(); }catch(e){} }
   lines.forEach(function(v){ var o=document.createElement("option"); o.value=v; dl.appendChild(o); });
   w.appendChild(l); w.appendChild(inp); w.appendChild(dl);
   w._get=function(){ return inp.value.trim(); };
@@ -849,18 +858,14 @@ function poleDist(a,b){
    виден глазами, а копаться в списке из сотни номеров дольше, чем ткнуть в
    метку. Показываем текущее значение и два действия — указать на карте либо
    вернуться к определению по координатам. */
-function poleComboEl(label,pole,which,pm){
+function poleComboEl(label,pole,which,pm,snap,rec){
   var w=document.createElement("div"); w.className="pop-field pop-combo";
   var l=document.createElement("div"); l.className="pop-lbl"; l.textContent=label;
   w.appendChild(l);
 
-  var d; try{ d=PPO.load(); }catch(e){ d={poles:[]}; }
+  var d=snap||{poles:[]};
   var autoNum="";
-  try{
-    var rec=PPO.chainSpans(d.poles).byItem.get(
-      d.poles.filter(function(x){ return x.id===pole.id; })[0]);
-    if(rec) autoNum=String((which==="next"?rec.nextNum:rec.prevNum)||"");
-  }catch(e){}
+  try{ if(rec) autoNum=String((which==="next"?rec.nextNum:rec.prevNum)||""); }catch(e){}
 
   var cur=String(pole[which+"Id"]||"");
   var cap=document.createElement("div"); cap.className="cmb-cur";
@@ -903,7 +908,9 @@ var pickState=null;
 function startPickNeighbour(pm, pole, which){
   pickState={ pmId:pm.id, poleId:pole.id, which:which };
   map.closePopup();
-  placemarks.forEach(function(x){ if(x.type==="point" && x.layer && x.layer.unbindPopup) x.layer.unbindPopup(); });
+  /* Карточки меток не отвязываем: на объекте в сотни опор это столько же
+     операций со слоями. Достаточно закрыть открывшуюся карточку в самом
+     обработчике клика — режим выбора живёт считаные секунды. */
   var bar=document.getElementById("pickBar");
   document.getElementById("pickTxt").textContent=
     "Укажите "+(which==="next"?"следующую":"предыдущую")+" опору для № "+(pole.num||"?")+
@@ -913,14 +920,11 @@ function startPickNeighbour(pm, pole, which){
 function endPickNeighbour(){
   pickState=null;
   document.getElementById("pickBar").classList.remove("on");
-  placemarks.forEach(function(x){
-    if(x.type==="point" && x.layer && x.layer.bindPopup)
-      x.layer.bindPopup(function(){ return buildPopup(x); },popupOpts());
-  });
 }
 function pickNeighbourAt(pm){
   if(!pickState) return false;
   var st=pickState;
+  map.closePopup();                       /* карточка выбранной метки не нужна */
   var tgt=poleOfMark(pm);
   if(!tgt){ toast("У этой метки нет опоры в осмотре — сначала перенесите её.",true); return true; }
   if(tgt.id===st.poleId){ toast("Опора не может быть соседом самой себе.",true); return true; }
@@ -930,7 +934,10 @@ function pickNeighbourAt(pm){
   refreshAllVisual();
   var src=placemarks.filter(function(x){ return x.id===st.pmId; })[0];
   toast((st.which==="next"?"Следующая":"Предыдущая")+" опора задана: № "+(tgt.num||"?"));
-  if(src && src.layer && src.layer.openPopup) src.layer.openPopup();
+  /* карточку исходной метки открываем следующим кадром: иначе она строится
+     в том же обработчике клика, и подвисание складывается из обоих действий */
+  if(src && src.layer && src.layer.openPopup)
+    setTimeout(function(){ src.layer.openPopup(); }, 0);
   return true;
 }
 
@@ -1024,8 +1031,23 @@ function addPhotosToPm(pm,files){
   toast("Добавлено фото: "+added);
 }
 function updatePmVisual(pm){ if(pm.layer) featureLayer.removeLayer(pm.layer); drawPlacemark(pm); }
-/* перекрасить и переподписать все метки разом */
-function refreshAllVisual(){ refreshGaps(); placemarks.forEach(updatePmVisual); }
+/* Перекраска после изменения цепи. Пересоздавать все метки нельзя: на объекте
+   в несколько сотен опор это снимает и заново строит столько же слоёв и
+   постоянных подписей, и браузер замирает на секунды. Сравниваем прежние
+   признаки с новыми и трогаем только те метки, у которых цвет изменился, —
+   причём меняем иконку у существующего слоя, а не сам слой. */
+function refreshAllVisual(){
+  var was=gapById;
+  refreshGaps();
+  var n=0;
+  placemarks.forEach(function(pm){
+    if(pm.type!=="point" || !pm.layer || !pm.layer.setIcon) return;
+    var id=pm.poleId||"";
+    if(String(was[id]||"")===String(gapById[id]||"")) return;
+    pm.layer.setIcon(makeIcon(pm)); n++;
+  });
+  return n;
+}
 
 /* ===== КАРТОЧКА МЕТКИ (фото + правка) ===== */
 function fieldEl(labelText,value,cls,listId){
@@ -1065,7 +1087,7 @@ function buildPopup(pm){
   (pm.photos||[]).forEach(function(ph,idx){
     var cell=document.createElement("div"); cell.className="ph-cell";
     var im=document.createElement("img"); im.src=ph.url; im.loading="lazy"; im.title="Открыть фото";
-    im.onclick=function(){ openLightbox(pm.photos,idx,photoTitleOf(pm)); };
+    im.onclick=function(){ openLightbox(pm.photos,idx,photoTitleOf(pm,snapForPhoto())); };
     var rm=document.createElement("button"); rm.className="ph-del"; rm.textContent="✕"; rm.title="Удалить фото";
     rm.onclick=function(e){ e.stopPropagation(); pm.photos.splice(idx,1);
       if(pm.type==="point"&&pm.layer&&pm.layer.setIcon) pm.layer.setIcon(makeIcon(pm));
@@ -1096,10 +1118,14 @@ function buildPopup(pm){
   /* Характеристики опоры правятся прямо здесь: полевой обход нередко даёт
      неверную линию или класс напряжения, и уходить ради этого в «Осмотр»
      незачем. Набор полей и правила те же, что в карточке опоры. */
-  var linkedPole=poleOfMark(pm);
+  /* один снимок данных на всю карточку: и опора, и её запись в цепи, и
+     перечни справочников берутся из него, а не читаются заново для каждого поля */
+  var snap=null; try{ snap=PPO.load(); }catch(e){ snap={poles:[]}; }
+  var linkedPole=poleOfMark(pm, snap);
+  var chainRec=null; try{ chainRec=PPO.chainRecOf(linkedPole); }catch(e){}
   var fLine=null, fKv=null, fMark=null, fHangs=null, fMest=null, fAngle=null, fNote=null;
   if(pm.type==="point"){
-    fLine=lineFieldEl("Линия / фидер", (linkedPole&&linkedPole.line) || pm.folder || "");
+    fLine=lineFieldEl("Линия / фидер", (linkedPole&&linkedPole.line) || pm.folder || "", snap);
     fKv=selectEl("Класс напряжения, кВ", PPO.LISTS.kv,
                  (linkedPole&&linkedPole.kv) || pm.kv || "", "— не выбран —");
     fMark=markFieldEl(fKv, (linkedPole&&linkedPole.mark) || pm.mark || "");
@@ -1137,8 +1163,8 @@ function buildPopup(pm){
   if(pm.type==="point"){
     if(linkedPole){
       fEnd=chkEl("Конечная (концевая) опора — пролёт до следующей не считать", !!linkedPole.endPole);
-      fPrev=poleComboEl("Предыдущая опора", linkedPole, "prev", pm);
-      fNext=poleComboEl("Следующая опора", linkedPole, "next", pm);
+      fPrev=poleComboEl("Предыдущая опора", linkedPole, "prev", pm, snap, chainRec);
+      fNext=poleComboEl("Следующая опора", linkedPole, "next", pm, snap, chainRec);
       d.appendChild(fEnd); d.appendChild(fPrev); d.appendChild(fNext);
       var g=gapOf(pm);
       if(g){
@@ -1269,13 +1295,15 @@ function lbApply(){ lbImgEl().style.transform="translate("+lbTx+"px,"+lbTy+"px) 
 function lbZoomReset(){ lbScale=1; lbTx=0; lbTy=0; lbApply(); }
 function lbSetScale(s){ lbScale=Math.min(6,Math.max(1,s)); if(lbScale<=1){ lbScale=1; lbTx=0; lbTy=0; } lbApply(); }
 function lbZoom(dir){ lbSetScale(lbScale*(dir>0?1.4:1/1.4)); }
+/* снимок данных для подписи фотографии: читается один раз при открытии */
+function snapForPhoto(){ try{ return PPO.load(); }catch(e){ return null; } }
 /* Подпись фотографии. В разделе «Осмотр» снимок подписан опорой и линией —
    на карте раньше было только имя файла, и в отрыве от карточки понять, к чему
    относится снимок, было нельзя. */
 var lbTitle="";
-function photoTitleOf(pm){
+function photoTitleOf(pm,snap){
   if(!pm || pm.type!=="point") return "";
-  var p=poleOfMark(pm);
+  var p=poleOfMark(pm,snap);
   var num=String((p&&p.num) || guessPoleNumber(pm) || "").trim();
   var ln=String((p&&p.line) || pm.folder || "").trim();
   var parts=[];

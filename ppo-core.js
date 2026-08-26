@@ -8,8 +8,12 @@
 'use strict';
 
 /* ------------------------------------------------------------------ ВЕРСИЯ */
-var VERSION = '3.5.8';
+var VERSION = '3.5.9';
 var STORE_KEY = 'ppo_vols_object_v2';
+/* Счётчик записей объекта. По нему обесценивается кэш построения цепи:
+   пересчитывать её на каждый запрос слишком дорого, а данные между записями
+   не меняются. */
+var _rev = 0;
 var DB_NAME = 'ppo_vols_photos';
 
 /* ============================================================ СПРАВОЧНИК ВЛ
@@ -881,6 +885,7 @@ var SACRIFICIAL_KEYS = ['ppo_map_state_v1'];
 function save(){
   var d = load();
   d.saved = new Date().toISOString();
+  _rev++;                       /* данные изменились — кэш цепи недействителен */
   var payload = JSON.stringify(d);
 
   /* отметка записи: по ней другие вкладки понимают, что объект изменился */
@@ -1698,13 +1703,19 @@ function orderByRoute(arr){
     return withGeo.map(function(x){ return x.p; })
       .sort(function(a, b){ return cmpPoleNum(a.num, b.num); }).concat(tail);
 
-  /* край линии: один из концов наиболее удалённой пары точек */
-  var best = -1, startIdx = 0;
-  for (var i = 0; i < withGeo.length; i++)
-    for (var j = i + 1; j < withGeo.length; j++){
-      var dd = haversine(withGeo[i].la, withGeo[i].lo, withGeo[j].la, withGeo[j].lo);
-      if (dd > best){ best = dd; startIdx = i; }
+  /* Край линии. Полный перебор пар давал квадратичный рост и на объекте в
+     несколько сотен опор ощутимо задерживал каждую перерисовку. Берём
+     двухпроходное приближение: самая дальняя точка от произвольной, затем
+     самая дальняя от неё. Для вытянутой трассы это те же концы. */
+  function farthestFrom(k){
+    var bi = k, bd = -1;
+    for (var q = 0; q < withGeo.length; q++){
+      var dq = haversine(withGeo[k].la, withGeo[k].lo, withGeo[q].la, withGeo[q].lo);
+      if (dq > bd){ bd = dq; bi = q; }
     }
+    return bi;
+  }
+  var startIdx = farthestFrom(farthestFrom(0));
 
   var left = withGeo.slice(), out = [];
   var cur = left.splice(startIdx, 1)[0];
@@ -2480,14 +2491,33 @@ function updatePoleFields(poleId, obj){
   return tgt;
 }
 
+/* ============================ КЭШ ЦЕПИ ПРОЛЁТОВ
+   Построение цепи — самая дорогая операция ядра, а за одно действие на карте
+   она запрашивалась пять-шесть раз подряд: карточкой метки, обоими полями
+   соседей, перекраской. Данные между этими вызовами не меняются, поэтому
+   результат держим до ближайшей записи объекта. Ревизию поднимает save(). */
+var _chainCache = null;
+function poleChain(){
+  var d = load();
+  if (_chainCache && _chainCache.rev === _rev) return _chainCache;
+  var byItem, gaps = {};
+  try { byItem = chainSpans(d.poles).byItem; }
+  catch (e) { return { rev:_rev, d:d, byItem:new Map(), gaps:{} }; }
+  d.poles.forEach(function(p){ gaps[p.id] = poleLinkGap(p, byItem.get(p) || null); });
+  _chainCache = { rev:_rev, d:d, byItem:byItem, gaps:gaps };
+  return _chainCache;
+}
+/* запись цепи по конкретной опоре — без повторного построения */
+function chainRecOf(pole){
+  if (!pole) return null;
+  var c = poleChain();
+  var src = c.d.poles.filter(function(x){ return x.id === pole.id; })[0];
+  return src ? (c.byItem.get(src) || null) : null;
+}
 /* Полнота привязки по всем опорам разом: карта красит сотни меток за одну
    отрисовку, и считать цепь на каждую метку отдельно недопустимо дорого. */
 function poleLinkGapAll(){
-  var d = load(), out = {};
-  var ch;
-  try { ch = chainSpans(d.poles).byItem; } catch (e) { return out; }
-  d.poles.forEach(function(p){ out[p.id] = poleLinkGap(p, ch.get(p) || null); });
-  return out;
+  return poleChain().gaps;
 }
 
 /* Опоры объекта → точки для карты (обратное направление синхронизации). */
@@ -3859,6 +3889,7 @@ global.PPO = {
   poleNumFromName:poleNumFromName, fixMeasLines:fixMeasLines, orderByRoute:orderByRoute,
   refOf:refOf, poleByRef:poleByRef, relinkNeighbours:relinkNeighbours, linkedNeighbour:linkedNeighbour,
   poleLinkGap:poleLinkGap, poleLinkGapText:poleLinkGapText, poleLinkGapAll:poleLinkGapAll,
+  poleChain:poleChain, chainRecOf:chainRecOf,
   deletePoleForMark:deletePoleForMark, setPoleLinks:setPoleLinks,
   updatePoleFields:updatePoleFields, POLE_EDITABLE:POLE_EDITABLE,
   syncObjectLength:syncObjectLength,
