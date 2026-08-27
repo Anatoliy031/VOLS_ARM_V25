@@ -12,9 +12,9 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/exifr/dist/full.umd.js"></script>
-<script src="ppo-core.js?v=3.5.9"></script>
-<script src="ppo-refs.js?v=3.5.9"></script>
-<script src="ppo-kmz.js?v=3.5.9"></script>
+<script src="ppo-core.js?v=3.5.10"></script>
+<script src="ppo-refs.js?v=3.5.10"></script>
+<script src="ppo-kmz.js?v=3.5.10"></script>
 
 <style>
 :root{
@@ -904,6 +904,10 @@ function poleComboEl(label,pole,which,pm,snap,rec){
    Пока режим включён, клик по метке не открывает её карточку, а назначает
    опору соседом. Всплывающие карточки на время снимаем: иначе клик открывал бы
    их поверх выбора. */
+/* Счётчик приостановок обратной подстановки из осмотра. Считаем именно
+   счётчиком, а не флагом: сохранений может идти несколько подряд. */
+var pullMuted=0;
+
 var pickState=null;
 function startPickNeighbour(pm, pole, which){
   pickState={ pmId:pm.id, poleId:pole.id, which:which };
@@ -1208,6 +1212,15 @@ function buildPopup(pm){
 
   var save=document.createElement("button"); save.className="pop-save"; save.textContent="Сохранить";
   save.onclick=function(){
+    /* На время сохранения обратная подстановка из осмотра приостановлена:
+       ниже объект записывается несколько раз (признаки цепи, характеристики
+       опоры), и каждая запись поднимала бы подтягивание, затирающее новый
+       номер метки ещё до переноса. */
+    pullMuted++;
+    var released=false;
+    function release(){ if(!released){ released=true; pullMuted=Math.max(0,pullMuted-1); } }
+    /* страховка: перенос не должен уметь оставить подтягивание выключенным */
+    setTimeout(release, 8000);
     var newName=nameInp.value.trim()||pm.name;
     var newPole=fPole._get();
     /* Название изменили, а «Номер опоры» не трогали — номер перечитываем из
@@ -1260,6 +1273,7 @@ function buildPopup(pm){
     saveMapState();
     if(pm.type==="point" && !guessPoleNumber(pm)){
       /* без номера опоры сопоставлять не с чем — раньше правка молча терялась */
+      release();
       toast("Сохранено на карте, но в осмотр не перенесено: не заполнен «Номер опоры»", true);
       return;
     }
@@ -1268,12 +1282,14 @@ function buildPopup(pm){
       syncOne(pm).then(function(r){
         /* опора могла быть создана только что — характеристики дописываем после */
         if(!linkedPole) applyPoleFields(pm.poleId);
+        release();
         refreshAllVisual();
         toast(r.added?"Сохранено · создана опора в осмотре"
              :(r.updated?("Сохранено · опора в осмотре обновлена"+(renamed?": № "+newPole:""))
                         :"Сохранено · в осмотре без изменений"));
-      });
+      }, function(){ release(); });
     } else {
+      release();
       toast(hasDefect(pm)?"Сохранено на карте · дефект отмечен. Не забудьте «→ В осмотр»"
                          :"Сохранено на карте. Не забудьте «→ В осмотр»");
     }
@@ -1627,6 +1643,11 @@ function saveMapNow(){
   /* осмотр правится в соседней вкладке — подхватываем без перезагрузки */
   document.addEventListener("ppo:saved", function(){
     if(!autoSync || !placemarks.length) return;
+    /* Пока сохраняется карточка метки, подтягивать из осмотра нельзя: правка
+       характеристик записывает объект раньше переноса, и обратная подстановка
+       возвращала метке прежний номер — переименование на карте не доходило
+       до раздела «Осмотр». */
+    if(pullMuted) return;
     pullFromOsmotr(true);
   });
   /* Ядро сообщило, что объект изменён в другой вкладке. Кэш к этому моменту
